@@ -1,0 +1,76 @@
+name: Multi-Env CI Pipeline
+
+on:
+  push:
+    branches:
+      - develop
+      - uat
+      - main
+
+env:
+  IMAGE_NAME: patient-service
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------
+      # Determine environment
+      # ------------------------
+      - name: Set environment
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "develop" ]]; then
+            echo "ENV=dev" >> $GITHUB_ENV
+            echo "REGISTRY=${{ secrets.DEV_REGISTRY }}" >> $GITHUB_ENV
+            echo "GITOPS_REPO=${{ secrets.DEV_GITOPS_REPO }}" >> $GITHUB_ENV
+          elif [[ "${GITHUB_REF_NAME}" == "uat" ]]; then
+            echo "ENV=uat" >> $GITHUB_ENV
+            echo "REGISTRY=${{ secrets.UAT_REGISTRY }}" >> $GITHUB_ENV
+            echo "GITOPS_REPO=${{ secrets.UAT_GITOPS_REPO }}" >> $GITHUB_ENV
+          else
+            echo "ENV=prod" >> $GITHUB_ENV
+            echo "REGISTRY=${{ secrets.PROD_REGISTRY }}" >> $GITHUB_ENV
+            echo "GITOPS_REPO=${{ secrets.PROD_GITOPS_REPO }}" >> $GITHUB_ENV
+          fi
+
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Set image tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Build image
+        run: |
+          docker build -t $REGISTRY/$IMAGE_NAME:$TAG .
+
+      - name: Push image
+        run: |
+          docker push $REGISTRY/$IMAGE_NAME:$TAG
+
+  update-gitops:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Update image tag
+        run: |
+          sed -i "s|tag: .*|tag: \"$TAG\"|g" values.yaml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "ci@github.com"
+          git add values.yaml
+          git commit -m "Update $IMAGE_NAME image to $TAG ($ENV)"
+          git push
